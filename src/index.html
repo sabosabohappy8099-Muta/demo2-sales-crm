@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <!-- 地図表示:Leaflet.js + OpenStreetMap(無料) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <?!= include('css'); ?>
+</head>
+<body>
+  <!-- 画面上部:会社名・ツール名/担当者の選択/今日の進捗 -->
+  <header class="app-header">
+    <div class="brand">
+      <span class="brand-logo" aria-hidden="true">🌿</span>
+      <div>
+        <div class="brand-company" id="companyName">読み込み中…</div>
+        <div class="brand-tool" id="toolName"></div>
+      </div>
+    </div>
+
+    <label class="staff-picker">
+      <span class="field-label">あなたの名前</span>
+      <select id="staffSelect" class="select"></select>
+    </label>
+
+    <div class="progress-box" id="progressBox" hidden>
+      <div class="progress-text">
+        <span id="progressLabel">今日の架電</span>
+        <span><strong id="todayCount">0</strong> / <span id="todayTarget">0</span> 件</span>
+      </div>
+      <div class="progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" id="progressTrack">
+        <div class="progress-bar" id="progressBar"></div>
+      </div>
+    </div>
+  </header>
+
+  <!-- メインタブ -->
+  <nav class="main-tabs" role="tablist">
+    <button class="main-tab active" data-tab="list" role="tab">📋 架電リスト</button>
+    <button class="main-tab" data-tab="map" role="tab">🗺️ 地図検索</button>
+    <button class="main-tab" data-tab="dashboard" role="tab">📊 ダッシュボード</button>
+  </nav>
+
+  <main class="app-main">
+    <!-- 架電リスト -->
+    <section class="tab-panel active" id="panel-list">
+      <div class="empty-card" id="pickStaffNotice">
+        <div class="empty-icon">👋</div>
+        <p>はじめに、画面上部の「あなたの名前」を選んでください。</p>
+      </div>
+
+      <div id="listArea" hidden>
+        <div class="sub-tabs" id="subTabs" role="tablist"></div>
+
+        <div class="toolbar">
+          <input type="search" id="searchInput" class="input search" placeholder="🔍 会社名・業種で検索">
+          <select id="ownerFilter" class="select" hidden aria-label="担当者で絞り込み"></select>
+          <div class="sort-group">
+            <select id="sortSelect" class="select" aria-label="並び替え">
+              <option value="next">次回架電日が近い順</option>
+              <option value="count">架電回数</option>
+              <option value="last">最終架電日</option>
+            </select>
+            <button class="btn btn-ghost" id="sortDirBtn" type="button"></button>
+          </div>
+        </div>
+
+        <div class="list-summary" id="listSummary"></div>
+        <div class="prospect-list" id="prospectList"></div>
+      </div>
+
+      <!-- 架電モード -->
+      <div id="callArea" hidden>
+        <div class="call-bar">
+          <button class="btn btn-ghost" id="callBackBtn" type="button">← リスト</button>
+          <div class="call-bar-title">
+            <div class="call-company" id="callCompany"></div>
+            <div class="call-sub" id="callSub"></div>
+          </div>
+          <div class="call-timer" id="callTimer" title="通話タイマー">⏱ 00:00</div>
+          <div class="call-bar-actions">
+            <a class="btn call-dial" id="callDial" href="#" target="_top">📞 発信</a>
+            <button class="btn btn-ghost" id="copyPhoneBtn" type="button" hidden>📋 番号コピー</button>
+            <button class="btn btn-ghost" id="mailTopBtn" type="button">📄 資料を送る</button>
+          </div>
+        </div>
+
+        <div class="call-grid">
+          <!-- 左:会社情報 -->
+          <section class="card call-col" id="callInfo"></section>
+
+          <!-- 中央:トークスクリプト -->
+          <section class="card call-col">
+            <div class="col-head">
+              <h3>🗒️ トークスクリプト</h3>
+              <div class="step-nav">
+                <button class="btn btn-ghost btn-sm" id="stepPrevBtn" type="button">◀ 戻る</button>
+                <button class="btn btn-sm" id="stepNextBtn" type="button">次へ ▶</button>
+              </div>
+            </div>
+            <ol class="script-steps" id="scriptSteps"></ol>
+          </section>
+
+          <!-- 右:切り返し -->
+          <section class="card call-col">
+            <div class="col-head"><h3>💬 切り返し</h3></div>
+            <label class="field">
+              <span class="field-label">相手の言葉を入力すると、最適な切り返しを表示します</span>
+              <input type="text" id="objectionInput" class="input" placeholder="例:予算がないので…" autocomplete="off">
+            </label>
+            <div id="rebuttalDetail" class="rebuttal-detail" hidden></div>
+            <div class="field-label">断り文句から選ぶ</div>
+            <div class="rebuttal-buttons" id="rebuttalButtons"></div>
+          </section>
+        </div>
+
+        <!-- 下部:架電結果の入力 -->
+        <section class="card result-card" id="resultForm">
+          <h3>📝 架電結果</h3>
+          <div class="status-choices" id="statusChoices" role="radiogroup" aria-label="結果のステータス"></div>
+          <div class="form-grid">
+            <label class="field">
+              <span class="field-label">次回架電日 <span class="req" id="nextCallReq" hidden>必須</span></span>
+              <input type="date" id="nextCallInput" class="input">
+            </label>
+            <label class="field">
+              <span class="field-label">使用した切り返し</span>
+              <select id="rebuttalUsed" class="select"></select>
+            </label>
+          </div>
+          <label class="field">
+            <span class="field-label">通話メモ</span>
+            <textarea id="callMemo" class="input" rows="3" placeholder="話した内容・相手の反応など"></textarea>
+          </label>
+          <div class="result-actions">
+            <button class="btn btn-lg" id="saveResultBtn" type="button">💾 結果を保存</button>
+            <button class="btn btn-ghost btn-lg" id="mailFormBtn" type="button">📄 資料を送る</button>
+          </div>
+        </section>
+
+        <!-- 保存後 -->
+        <section class="card done-card" id="savedPanel" hidden>
+          <div class="done-message" id="savedSummary"></div>
+          <div class="done-actions">
+            <button class="btn btn-lg" id="nextCallBtn" type="button">次の架電先へ ▶</button>
+            <button class="btn btn-ghost btn-lg" id="mailSavedBtn" type="button">📄 資料を送る</button>
+            <button class="btn btn-ghost btn-lg" id="backToListBtn" type="button">リストに戻る</button>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- 地図検索 -->
+    <section class="tab-panel" id="panel-map">
+      <div class="card map-toolbar">
+        <form class="map-search" id="mapSearchForm">
+          <input type="search" id="mapAddress" class="input" placeholder="住所・駅名(例:渋谷駅)" autocomplete="off">
+          <button class="btn" id="mapSearchBtn" type="submit">🔍 検索</button>
+        </form>
+        <div class="map-controls">
+          <label class="radius-control">
+            <span class="field-label">半径 <strong id="radiusLabel">2.0</strong> km</span>
+            <input type="range" id="radiusSlider" min="0.5" max="10" step="0.5" value="2">
+          </label>
+          <div class="layer-toggles">
+            <label class="toggle"><input type="checkbox" id="toggleCustomers" checked><span class="dot dot-green"></span>導入企業</label>
+            <label class="toggle"><input type="checkbox" id="toggleProspects" checked><span class="dot dot-blue"></span>見込み客</label>
+            <span class="toggle"><span class="dot dot-red"></span>検索地点</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="map-layout">
+        <div class="card map-card"><div id="map" class="map"></div></div>
+        <aside class="card map-result">
+          <div class="map-center-label" id="mapCenterLabel"></div>
+          <div class="nearby-total">
+            <span class="field-label">範囲内の導入企業</span>
+            <div><strong id="nearbyCount">0</strong> 社</div>
+          </div>
+          <div class="plan-breakdown" id="planBreakdown"></div>
+          <div class="field-label">近い順</div>
+          <ol class="nearby-list" id="nearbyList"></ol>
+        </aside>
+      </div>
+    </section>
+
+    <!-- 成果ダッシュボード -->
+    <section class="tab-panel" id="panel-dashboard">
+      <div class="empty-card" id="dashPickStaff">
+        <div class="empty-icon">👋</div>
+        <p>画面上部の「あなたの名前」を選ぶと、成果が表示されます。</p>
+      </div>
+
+      <div id="dashArea" hidden>
+        <div class="dash-toolbar">
+          <div class="segmented" id="periodTabs" role="tablist" aria-label="期間">
+            <button type="button" class="seg-btn active" data-period="today" role="tab">今日</button>
+            <button type="button" class="seg-btn" data-period="week" role="tab">今週</button>
+            <button type="button" class="seg-btn" data-period="month" role="tab">今月</button>
+          </div>
+          <select id="dashOwnerFilter" class="select" hidden aria-label="担当者で絞り込み"></select>
+          <span class="dash-range" id="dashRange"></span>
+        </div>
+
+        <div class="kpi-grid" id="kpiGrid"></div>
+
+        <section class="card dash-section" id="ownerCompare" hidden>
+          <div class="col-head"><h3>👥 担当者別の比較・ランキング</h3><span class="field-label">成約数 → 成約率 → 架電数の順</span></div>
+          <div class="table-wrap"><table class="data-table" id="ownerTable"></table></div>
+        </section>
+
+        <div class="chart-grid">
+          <section class="card chart-card chart-wide">
+            <div class="col-head"><h3>📈 日別の推移</h3><span class="field-label" id="trendLabel"></span></div>
+            <div class="mini-charts">
+              <div class="mini-chart">
+                <div class="mini-title"><span class="swatch" style="background:#2a78d6"></span>架電数</div>
+                <div class="chart-box"><canvas id="trendCallsChart" role="img" aria-label="日別の架電数の折れ線グラフ"></canvas></div>
+              </div>
+              <div class="mini-chart">
+                <div class="mini-title"><span class="swatch" style="background:#008300"></span>成約数</div>
+                <div class="chart-box"><canvas id="trendWonChart" role="img" aria-label="日別の成約数の折れ線グラフ"></canvas></div>
+              </div>
+            </div>
+            <details class="table-view"><summary>数値を表で見る</summary><div class="table-wrap" id="trendTable"></div></details>
+          </section>
+
+          <section class="card chart-card">
+            <div class="col-head"><h3>🍩 ステータス別の構成</h3><span class="field-label">現在のリスト</span></div>
+            <div class="donut-wrap">
+              <div class="donut-box">
+                <canvas id="statusChart" role="img" aria-label="ステータス別の構成のドーナツグラフ"></canvas>
+                <div class="donut-center"><strong id="statusTotal">0</strong><span>社</span></div>
+              </div>
+              <ul class="legend-list" id="statusLegend"></ul>
+            </div>
+          </section>
+
+          <section class="card chart-card">
+            <div class="col-head"><h3>💬 断り文句の分類別の発生件数</h3></div>
+            <p class="chart-note">件数が多い分類ほど、切り返しトークを強化する効果が大きくなります。</p>
+            <div class="chart-box bar-box"><canvas id="rebuttalChart" role="img" aria-label="断り文句の分類別の発生件数の棒グラフ"></canvas></div>
+            <details class="table-view"><summary>数値を表で見る</summary><div class="table-wrap" id="rebuttalTable"></div></details>
+          </section>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <!-- 読み込み表示・トースト通知 -->
+  <div class="loading" id="loading" hidden>
+    <div class="spinner" aria-label="読み込み中"></div>
+  </div>
+  <div class="toast-area" id="toastArea" aria-live="polite"></div>
+
+  <!-- 資料送付ダイアログ -->
+  <div class="modal" id="mailModal" hidden role="dialog" aria-modal="true" aria-labelledby="mailTitle">
+    <div class="modal-card">
+      <div class="modal-head">
+        <h3 id="mailTitle">📄 資料を送る</h3>
+        <button class="icon-btn" id="mailCloseBtn" type="button" aria-label="閉じる">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="field-label">資料を選ぶ</div>
+        <div class="material-choices" id="materialChoices"></div>
+        <label class="field">
+          <span class="field-label">送信先</span>
+          <input type="email" id="mailTo" class="input">
+        </label>
+        <label class="field">
+          <span class="field-label">件名</span>
+          <input type="text" id="mailSubject" class="input">
+        </label>
+        <label class="field">
+          <span class="field-label">本文(編集できます)</span>
+          <textarea id="mailBody" class="input" rows="12"></textarea>
+        </label>
+        <div class="field-label">送付方法</div>
+        <div class="send-modes">
+          <label class="send-mode">
+            <input type="radio" name="mailMode" value="draft" checked>
+            <span><strong>Gmailの下書きに保存</strong><small>Gmailで内容を確認してから送れます(誤送信防止)</small></span>
+          </label>
+          <label class="send-mode">
+            <input type="radio" name="mailMode" value="send">
+            <span><strong>今すぐ送信</strong><small>送信先が example.com(ダミー)の場合は、デモのためWebアプリの実行ユーザー自身のアドレスに送信します</small></span>
+          </label>
+        </div>
+        <div class="mail-note" id="mailRecordNote"></div>
+        <div class="fax-note">📠 FAX送付は、外部FAXサービスとのAPI連携で追加可能です。</div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn btn-ghost" id="mailCancelBtn" type="button">キャンセル</button>
+        <button class="btn" id="mailSendBtn" type="button">下書きに保存</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <!-- グラフ:Chart.js -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
+
+  <?!= include('js'); ?>
+</body>
+</html>

@@ -1,0 +1,1314 @@
+<script>
+  /* ===== 画面の状態 ===== */
+  const STORAGE_KEY = { STAFF: 'crmDemo.staffName', LIST_TYPE: 'crmDemo.listType' };
+  const FAVORITE_TAB = 'お気に入り';
+  /** 並び替えの初期の向き(next:近い順、count:多い順、last:新しい順) */
+  const SORT_DEFAULT_DIR = { next: 'asc', count: 'desc', last: 'desc' };
+
+  const state = {
+    init: null,          // getInitialData の結果
+    staff: null,         // 選択中の担当者 { name, role }
+    today: '',           // サーバー基準の今日(yyyy-MM-dd)
+    prospects: [],
+    listType: '通常',
+    search: '',
+    owner: '',           // マネージャーの担当者絞り込み(空なら全員)
+    sort: 'next',
+    dir: 'asc',
+  };
+
+  const $ = function (id) { return document.getElementById(id); };
+
+  /* ===== ブラウザへの保存(使えない環境でも動くように try で囲む) ===== */
+  function loadPref(key) {
+    try { return window.localStorage.getItem(key); } catch (e) { return null; }
+  }
+  function savePref(key, value) {
+    try { window.localStorage.setItem(key, value); } catch (e) { /* 保存できなくても動作は続ける */ }
+  }
+
+  /* ===== サーバー呼び出し ===== */
+  let loadingCount = 0;
+  function setLoading(on) {
+    loadingCount = Math.max(0, loadingCount + (on ? 1 : -1));
+    $('loading').hidden = loadingCount === 0;
+  }
+
+  /**
+   * google.script.run を Promise で呼び出す
+   * @param {string} fnName サーバー側の関数名
+   * @param {Array} args 引数
+   * @param {{button?: HTMLButtonElement, silent?: boolean}} opt
+   *   button: 処理中は押せなくする(二重押し防止) / silent: 画面全体の読み込み表示を出さない
+   */
+  function callServer(fnName, args, opt) {
+    opt = opt || {};
+    if (opt.button) opt.button.disabled = true;
+    if (!opt.silent) setLoading(true);
+    return new Promise(function (resolve, reject) {
+      google.script.run
+        .withSuccessHandler(resolve)
+        .withFailureHandler(function (err) { reject(new Error(friendlyError(err))); })[fnName].apply(null, args || []);
+    }).finally(function () {
+      if (opt.button) opt.button.disabled = false;
+      if (!opt.silent) setLoading(false);
+    });
+  }
+
+  /** 通信切れ・ログイン切れなど、サーバーに届く前のエラーを分かりやすい文にする */
+  function friendlyError(err) {
+    const message = String(err && err.message ? err.message : err);
+    if (/network|failed to fetch|NetworkError|timeout/i.test(message)) {
+      return '通信に失敗しました。電波状況を確認して、もう一度お試しください';
+    }
+    if (/authoriz|permission|login|ログイン|権限/i.test(message)) {
+      return 'ログインの有効期限が切れた可能性があります。ページを再読み込みしてください';
+    }
+    return message;
+  }
+
+  // 画面側の想定外のエラーも、黙って止まらずに知らせる
+  window.addEventListener('error', function (e) {
+    console.error(e.error || e.message);
+    toast('画面でエラーが発生しました。うまく動かない場合はページを再読み込みしてください', 'error');
+  });
+  window.addEventListener('unhandledrejection', function (e) {
+    console.error(e.reason);
+  });
+
+  /* ===== トースト通知 ===== */
+  function toast(message, type) {
+    const el = document.createElement('div');
+    el.className = 'toast' + (type === 'error' ? ' error' : '');
+    el.textContent = (type === 'error' ? '⚠️ ' : '✅ ') + message;
+    $('toastArea').appendChild(el);
+    setTimeout(function () { el.remove(); }, type === 'error' ? 6000 : 3000);
+  }
+
+  /* ===== 表示用の小さな補助関数 ===== */
+  function esc(value) {
+    return String(value == null ? '' : value).replace(/[&<>"']/g, function (c) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+    });
+  }
+
+  /** 'yyyy-MM-dd' または 'yyyy-MM-dd HH:mm' → '10/08(木)' */
+  function shortDate(value) {
+    if (!value) return '';
+    const p = value.slice(0, 10).split('-').map(Number);
+    const d = new Date(p[0], p[1] - 1, p[2]);
+    return (p[1]) + '/' + String(p[2]).padStart(2, '0') + '(' + '日月火水木金土'[d.getDay()] + ')';
+  }
+
+  function isManager() {
+    return state.staff && state.staff.role === state.init.roles.MANAGER;
+  }
+
+  /** 次回架電日が今日以前で、まだ架電を続ける区分(通常・見込み)なら「今日かける」 */
+  function isCallToday(p) {
+    return !!p.nextCallDate && p.nextCallDate <= state.today &&
+      (p.listType === '通常' || p.listType === '見込み');
+  }
+
+  /* ===== 初期化 ===== */
+  document.addEventListener('DOMContentLoaded', function () {
+    bindEvents();
+    callServer('getInitialData')
+      .then(function (data) {
+        state.init = data;
+        $('companyName').textContent = data.companyName;
+        $('toolName').textContent = data.toolName;
+        renderStaffSelect();
+
+        const savedType = loadPref(STORAGE_KEY.LIST_TYPE);
+        if (savedType) state.listType = savedType;
+
+        const saved = loadPref(STORAGE_KEY.STAFF);
+        const staff = data.staff.filter(function (s) { return s.name === saved; })[0];
+        if (staff) selectStaff(staff.name);
+      })
+      .catch(function (err) {
+        $('companyName').textContent = '読み込みに失敗しました';
+        toast(err.message, 'error');
+      });
+  });
+
+  function bindEvents() {
+    $('staffSelect').addEventListener('change', function (e) { selectStaff(e.target.value); });
+
+    document.querySelectorAll('.main-tab').forEach(function (btn) {
+      btn.addEventListener('click', function () { showMainTab(btn.dataset.tab); });
+    });
+
+    $('searchInput').addEventListener('input', function (e) {
+      state.search = e.target.value.trim();
+      renderList();
+    });
+    $('ownerFilter').addEventListener('change', function (e) {
+      state.owner = e.target.value;
+      renderSubTabs();
+      renderList();
+    });
+    $('sortSelect').addEventListener('change', function (e) {
+      state.sort = e.target.value;
+      state.dir = SORT_DEFAULT_DIR[state.sort];
+      renderList();
+    });
+    $('sortDirBtn').addEventListener('click', function () {
+      state.dir = state.dir === 'asc' ? 'desc' : 'asc';
+      renderList();
+    });
+
+    // サブタブ・各行のボタンはまとめて受け取る(描画し直しても動くように)
+    $('subTabs').addEventListener('click', function (e) {
+      const btn = e.target.closest('.sub-tab');
+      if (!btn) return;
+      state.listType = btn.dataset.type;
+      savePref(STORAGE_KEY.LIST_TYPE, state.listType);
+      renderSubTabs();
+      renderList();
+    });
+    $('prospectList').addEventListener('click', function (e) {
+      const fav = e.target.closest('.fav-btn');
+      if (fav) return toggleFavorite(fav.dataset.id);
+      const mapBtn = e.target.closest('.map-btn');
+      if (mapBtn) return openMapForProspect(mapBtn.dataset.id);
+      const callBtn = e.target.closest('.call-btn');
+      if (callBtn) return startCall(callBtn.dataset.id);
+    });
+  }
+
+  function showMainTab(tab) {
+    document.querySelectorAll('.main-tab').forEach(function (b) { b.classList.toggle('active', b.dataset.tab === tab); });
+    document.querySelectorAll('.tab-panel').forEach(function (p) { p.classList.toggle('active', p.id === 'panel-' + tab); });
+    if (tab === 'map') return onMapTabShown();
+    if (tab === 'dashboard') return loadDashboard();
+    return Promise.resolve();
+  }
+
+  /* ===== 担当者の選択 ===== */
+  function renderStaffSelect() {
+    const options = ['<option value="">選択してください</option>'].concat(
+      state.init.staff.map(function (s) {
+        return '<option value="' + esc(s.name) + '">' + esc(s.name) + '(' + esc(s.role) + ')</option>';
+      }));
+    $('staffSelect').innerHTML = options.join('');
+  }
+
+  function selectStaff(name) {
+    const staff = state.init.staff.filter(function (s) { return s.name === name; })[0] || null;
+    state.staff = staff;
+    // 架電モード中に担当者を切り替えた場合は、架電モードを閉じてリストに戻す
+    if (call.ctx) {
+      stopTimer();
+      call.ctx = null;
+      $('callArea').hidden = true;
+    }
+    $('staffSelect').value = staff ? staff.name : '';
+    $('pickStaffNotice').hidden = !!staff;
+    $('listArea').hidden = !staff;
+    $('progressBox').hidden = !staff;
+    $('dashPickStaff').hidden = !!staff;
+    $('dashArea').hidden = !staff;
+    if (!staff) return;
+
+    savePref(STORAGE_KEY.STAFF, staff.name);
+    state.owner = '';
+    dash.owner = '';
+    renderOwnerFilter();
+    loadList().then(function () {
+      if (activeMainTab() === 'dashboard') loadDashboard();
+      if (activeMainTab() === 'map' && mapState.map) renderProspectPins();
+    });
+  }
+
+  function activeMainTab() {
+    const active = document.querySelector('.main-tab.active');
+    return active ? active.dataset.tab : 'list';
+  }
+
+  /** マネージャーのみ、担当者での絞り込みを表示する */
+  function renderOwnerFilter() {
+    const sales = state.init.staff.filter(function (s) { return s.role === state.init.roles.SALES; });
+    const options = '<option value="">👥 全担当者</option>' + sales.map(function (s) {
+      return '<option value="' + esc(s.name) + '">' + esc(s.name) + '</option>';
+    }).join('');
+    // 架電リストとダッシュボードの両方の絞り込み
+    ['ownerFilter', 'dashOwnerFilter'].forEach(function (id) {
+      $(id).hidden = !isManager();
+      if (isManager()) $(id).innerHTML = options;
+    });
+  }
+
+  /* ===== 架電リスト ===== */
+  function loadList() {
+    return callServer('getListData', [state.staff.name])
+      .then(function (data) {
+        state.today = data.today;
+        state.prospects = data.prospects;
+        renderProgress(data.todayCount, data.dailyTarget);
+        renderSubTabs();
+        renderList();
+      })
+      .catch(function (err) { toast(err.message, 'error'); });
+  }
+
+  function renderProgress(count, target) {
+    const rate = target > 0 ? Math.min(100, Math.round(count / target * 100)) : 0;
+    $('progressLabel').textContent = isManager() ? 'チームの今日の架電' : '今日の架電';
+    $('todayCount').textContent = count;
+    $('todayTarget').textContent = target;
+    $('progressBar').style.width = rate + '%';
+    $('progressTrack').setAttribute('aria-valuenow', rate);
+    $('progressBox').classList.toggle('done', target > 0 && count >= target);
+  }
+
+  /** 担当者の絞り込みだけを反映した見込み客(件数バッジの母数) */
+  function scopedProspects() {
+    if (!state.owner) return state.prospects;
+    return state.prospects.filter(function (p) { return p.owner === state.owner; });
+  }
+
+  function inListType(p, type) {
+    return type === FAVORITE_TAB ? p.favorite : p.listType === type;
+  }
+
+  function renderSubTabs() {
+    const scoped = scopedProspects();
+    const types = state.init.listTypes.concat([FAVORITE_TAB]);
+    if (types.indexOf(state.listType) === -1) state.listType = types[0];
+    $('subTabs').innerHTML = types.map(function (type) {
+      const count = scoped.filter(function (p) { return inListType(p, type); }).length;
+      const label = type === FAVORITE_TAB ? '★ ' + type : type;
+      return '<button class="sub-tab' + (type === state.listType ? ' active' : '') + '" data-type="' + esc(type) + '" role="tab">' +
+        esc(label) + '<span class="badge">' + count + '</span></button>';
+    }).join('');
+  }
+
+  function filteredProspects() {
+    const keyword = state.search.toLowerCase();
+    const list = scopedProspects().filter(function (p) {
+      if (!inListType(p, state.listType)) return false;
+      if (!keyword) return true;
+      return (p.company + ' ' + p.industry).toLowerCase().indexOf(keyword) !== -1;
+    });
+    return sortProspects(list);
+  }
+
+  /** 並び替え(値が空のものは向きに関係なく最後) */
+  function sortProspects(list) {
+    const key = { next: 'nextCallDate', count: 'callCount', last: 'lastCalledAt' }[state.sort];
+    const sign = state.dir === 'asc' ? 1 : -1;
+    return list.slice().sort(function (a, b) {
+      const va = a[key], vb = b[key];
+      const emptyA = va === '' || va == null, emptyB = vb === '' || vb == null;
+      if (emptyA !== emptyB) return emptyA ? 1 : -1;
+      if (va < vb) return -sign;
+      if (va > vb) return sign;
+      return a.id < b.id ? -1 : 1;
+    });
+  }
+
+  function renderSortDir() {
+    const labels = {
+      next: { asc: '↑ 近い順', desc: '↓ 遠い順' },
+      count: { asc: '↑ 少ない順', desc: '↓ 多い順' },
+      last: { asc: '↑ 古い順', desc: '↓ 新しい順' },
+    };
+    $('sortDirBtn').textContent = labels[state.sort][state.dir];
+  }
+
+  function renderList() {
+    renderSortDir();
+    const list = filteredProspects();
+    const todayCount = list.filter(isCallToday).length;
+    $('listSummary').innerHTML = list.length + '件を表示' +
+      (todayCount ? '(うち <strong>今日かける ' + todayCount + '件</strong>)' : '');
+
+    if (list.length === 0) {
+      $('prospectList').innerHTML = '<div class="empty-card"><div class="empty-icon">🌱</div>' +
+        '<p>' + (state.search ? '条件に合う会社がありません。' : 'このリストに会社はありません。') + '</p></div>';
+      return;
+    }
+    $('prospectList').innerHTML = list.map(renderCard).join('');
+  }
+
+  function renderCard(p) {
+    const today = isCallToday(p);
+    const statusIndex = state.init.statusList.indexOf(p.status);
+    const meta = [p.industry, p.size + '名'];
+    if (isManager()) meta.push('担当:' + p.owner);
+
+    return '' +
+      '<div class="prospect-card' + (today ? ' is-today' : '') + '">' +
+        '<div class="pc-main">' +
+          '<div class="pc-company">' + esc(p.company) + (today ? '<span class="today-chip">今日かける</span>' : '') + '</div>' +
+          '<div class="pc-meta">' + meta.map(function (m) { return '<span>' + esc(m) + '</span>'; }).join('') + '</div>' +
+        '</div>' +
+        '<div class="pc-info">' +
+          '<span class="status-badge status-' + statusIndex + '">' + esc(p.status) + '</span>' +
+          (p.nextCallDate ? '<span class="pc-next' + (today ? ' is-today' : '') + '">次回 ' + shortDate(p.nextCallDate) + '</span>' : '') +
+          '<span>架電 ' + p.callCount + '回' + (p.lastCalledAt ? '・最終 ' + shortDate(p.lastCalledAt) : '') + '</span>' +
+        '</div>' +
+        '<div class="pc-actions">' +
+          '<button class="fav-btn' + (p.favorite ? ' on' : '') + '" data-id="' + esc(p.id) + '" ' +
+            'aria-label="お気に入り" aria-pressed="' + p.favorite + '">' + (p.favorite ? '★' : '☆') + '</button>' +
+          '<button class="map-btn" data-id="' + esc(p.id) + '" aria-label="地図で見る" title="地図で見る"' + (p.lat == null ? ' disabled' : '') + '>🗺️</button>' +
+          '<button class="btn call-btn" data-id="' + esc(p.id) + '">📞 電話</button>' +
+        '</div>' +
+      '</div>';
+  }
+
+  /* ===== お気に入り(先に画面を切り替え、失敗したら元に戻す) ===== */
+  const favoritePending = {}; // 保存中の見込み客ID(連打による保存順の入れ替わりを防ぐ)
+  function toggleFavorite(id) {
+    const p = state.prospects.filter(function (x) { return x.id === id; })[0];
+    if (!p || favoritePending[id]) return;
+    favoritePending[id] = true;
+    const next = !p.favorite;
+    p.favorite = next;
+    renderSubTabs();
+    renderList();
+
+    callServer('setFavorite', [id, next], { silent: true })
+      .then(function () { toast(next ? 'お気に入りに追加しました' : 'お気に入りから外しました'); })
+      .catch(function (err) {
+        p.favorite = !next;
+        renderSubTabs();
+        renderList();
+        toast(err.message, 'error');
+      })
+      .finally(function () { delete favoritePending[id]; });
+  }
+
+  /* ===== 架電モード ===== */
+  const RESULT_STATUSES = ['不在・再架電', '見込み', '資料送付済み', '成約', 'NG'];
+  const STATUS_REQUIRES_NEXT_DATE = ['不在・再架電', '見込み'];
+  const STATUS_CLEARS_NEXT_DATE = ['成約', 'NG'];
+  /** ステータスを選んだときに入れる次回架電日(今日から何営業日後か) */
+  const NEXT_DATE_SUGGEST_DAYS = { '不在・再架電': 1, '見込み': 5, '資料送付済み': 3 };
+  const IS_TOUCH = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
+
+  const call = {
+    ctx: null,        // getCallContext の結果
+    stepIndex: 0,
+    status: '',
+    saved: false,
+    timerId: null,
+    startedAt: 0,
+    queue: [],        // 架電モードを開いた時点の「通常」リストの並び(次の架電先へ で使う)
+    suggestSeq: 0,    // 切り返し判定の順番(古い応答で上書きしないため)
+    suggestTimer: null,
+  };
+
+  function bindCallEvents() {
+    $('callBackBtn').addEventListener('click', function () { closeCall(false); });
+    $('backToListBtn').addEventListener('click', function () { closeCall(true); });
+    $('nextCallBtn').addEventListener('click', goNextCall);
+    $('copyPhoneBtn').addEventListener('click', copyPhone);
+    $('stepPrevBtn').addEventListener('click', function () { setStep(call.stepIndex - 1); });
+    $('stepNextBtn').addEventListener('click', function () { setStep(call.stepIndex + 1); });
+    $('scriptSteps').addEventListener('click', function (e) {
+      const li = e.target.closest('.script-step');
+      if (li) setStep(Number(li.dataset.index));
+    });
+    $('rebuttalButtons').addEventListener('click', function (e) {
+      const btn = e.target.closest('.rebuttal-btn');
+      if (btn) showRebuttal(btn.dataset.category, { source: 'button' });
+    });
+    $('objectionInput').addEventListener('input', onObjectionInput);
+    $('statusChoices').addEventListener('click', function (e) {
+      const btn = e.target.closest('.status-choice');
+      if (btn) selectResultStatus(btn.dataset.status);
+    });
+    $('saveResultBtn').addEventListener('click', saveResult);
+    $('callInfo').addEventListener('click', function (e) {
+      if (e.target.closest('[data-action="open-map"]')) openMapForProspect(call.ctx.prospect.id);
+    });
+    ['mailTopBtn', 'mailFormBtn', 'mailSavedBtn'].forEach(function (id) {
+      $(id).addEventListener('click', openMailDialog);
+    });
+  }
+  document.addEventListener('DOMContentLoaded', bindCallEvents);
+
+  /** 電話番号を tel: リンク用の形にする */
+  function telHref(phone) {
+    return 'tel:' + String(phone || '').replace(/[^\d+]/g, '');
+  }
+
+  /** スマホでは、押したその場で電話アプリを起動する(押した操作の中で呼ぶ必要がある) */
+  function dial(phone) {
+    const a = document.createElement('a');
+    a.href = telHref(phone);
+    a.target = '_top';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  function findProspect(id) {
+    return state.prospects.filter(function (p) { return p.id === id; })[0];
+  }
+
+  /** 担当者の絞り込みと並び順を反映した「通常」リストの並び */
+  function normalQueue() {
+    return sortProspects(scopedProspects().filter(function (p) { return p.listType === '通常'; }))
+      .map(function (p) { return p.id; });
+  }
+
+  /**
+   * 架電モードを開く
+   * @param {string} id 見込み客ID
+   * @param {{keepQueue?: boolean}} opt
+   */
+  function startCall(id, opt) {
+    opt = opt || {};
+    const p = findProspect(id);
+    if (!p) return;
+    if (IS_TOUCH && p.phone) dial(p.phone);
+    if (!opt.keepQueue) call.queue = normalQueue();
+
+    callServer('getCallContext', [id, state.staff.name])
+      .then(function (ctx) {
+        call.ctx = ctx;
+        call.stepIndex = 0;
+        call.status = '';
+        call.saved = false;
+        call.historyId = '';
+        $('listArea').hidden = true;
+        $('callArea').hidden = false;
+        renderCall();
+        startTimer();
+        window.scrollTo(0, 0);
+      })
+      .catch(function (err) { toast(err.message, 'error'); });
+  }
+
+  function closeCall(force) {
+    if (!force && !call.saved && !confirm('架電結果を保存せずにリストに戻りますか?')) return;
+    stopTimer();
+    call.ctx = null;
+    $('callArea').hidden = true;
+    $('listArea').hidden = false;
+    renderSubTabs();
+    renderList();
+  }
+
+  /** 「次の架電先へ」:開いた時点の通常リストで、今の会社の次にある会社へ */
+  function goNextCall() {
+    const currentId = call.ctx.prospect.id;
+    const pos = call.queue.indexOf(currentId);
+    const rest = call.queue.slice(pos + 1).concat(pos === -1 ? [] : call.queue.slice(0, pos));
+    const nextId = rest.filter(function (id) {
+      const p = findProspect(id);
+      return p && id !== currentId && p.listType === '通常';
+    })[0];
+    if (!nextId) {
+      toast('通常リストに次の架電先はありません');
+      return closeCall(true);
+    }
+    startCall(nextId, { keepQueue: true });
+  }
+
+  /* --- 描画 --- */
+  function renderCall() {
+    const p = call.ctx.prospect;
+    $('callCompany').textContent = p.company;
+    $('callSub').textContent = (p.contact || '担当窓口未登録') + '/' + p.phone;
+    $('callDial').href = telHref(p.phone);
+    $('copyPhoneBtn').hidden = IS_TOUCH;
+
+    renderCallInfo();
+    renderSteps();
+    renderRebuttalButtons();
+    $('objectionInput').value = '';
+    $('rebuttalDetail').hidden = true;
+
+    // 結果入力欄を初期化
+    $('statusChoices').innerHTML = RESULT_STATUSES.map(function (s) {
+      return '<button type="button" class="status-choice" role="radio" aria-checked="false" data-status="' + esc(s) + '">' + esc(s) + '</button>';
+    }).join('');
+    $('rebuttalUsed').innerHTML = '<option value="">なし</option>' + call.ctx.rebuttals.map(function (r) {
+      return '<option value="' + esc(r.category) + '">' + esc(r.category) + '</option>';
+    }).join('');
+    $('nextCallInput').value = '';
+    $('nextCallInput').disabled = false;
+    $('nextCallInput').min = call.ctx.today;
+    $('nextCallReq').hidden = true;
+    $('callMemo').value = '';
+    $('resultForm').hidden = false;
+    $('savedPanel').hidden = true;
+  }
+
+  function renderCallInfo() {
+    const p = call.ctx.prospect;
+    const statusIndex = state.init.statusList.indexOf(p.status);
+    const rows = [
+      ['業種', p.industry], ['規模', p.size + '名'], ['窓口', p.contact], ['電話', p.phone],
+      ['メール', p.email], ['住所', p.address], ['担当', p.owner],
+      ['次回', p.nextCallDate ? shortDate(p.nextCallDate) : '―'],
+    ];
+    const history = call.ctx.history;
+    $('callInfo').innerHTML =
+      '<div class="col-head"><h3>🏢 会社情報</h3><span class="status-badge status-' + statusIndex + '">' + esc(p.status) + '</span></div>' +
+      '<dl class="info-list">' + rows.map(function (r) {
+        return '<dt>' + esc(r[0]) + '</dt><dd>' + esc(r[1]) + '</dd>';
+      }).join('') + '</dl>' +
+      (p.memo ? '<div class="info-memo">📌 ' + esc(p.memo) + '</div>' : '') +
+      renderNearbyBox() +
+      '<div class="history-title">過去の架電履歴(' + p.callCount + '回)</div>' +
+      (history.length
+        ? '<ul class="history-list">' + history.map(renderHistoryItem).join('') + '</ul>'
+        : '<div class="field-label">まだ架電履歴はありません</div>');
+  }
+
+  /** 「この近くで導入している会社はありますか?」にすぐ答えるための表示 */
+  function renderNearbyBox() {
+    const nearby = call.ctx.nearby || [];
+    if (!nearby.length) return '';
+    return '<div class="nearby-box">🌿 近隣の導入企業 ' + nearby.map(function (n) {
+      return '<span>半径' + n.radiusKm + 'km <strong>' + n.count + '</strong>社</span>';
+    }).join(' ') +
+      '<button type="button" class="btn btn-ghost btn-sm" data-action="open-map">🗺️ 地図で見る</button></div>';
+  }
+
+  function renderHistoryItem(h, isNew) {
+    const statusIndex = state.init.statusList.indexOf(h.result);
+    return '<li class="history-item' + (isNew === true ? ' is-new' : '') + '">' +
+      '<div class="h-head"><span>' + shortDate(h.datetime) + ' ' + esc(h.datetime.slice(11)) + '</span>' +
+      '<span class="status-badge status-' + statusIndex + '">' + esc(h.result) + '</span>' +
+      '<span>' + esc(h.owner) + '</span></div>' +
+      (h.memo ? '<div class="h-memo">' + esc(h.memo) + '</div>' : '') +
+      (h.rebuttal ? '<div class="h-memo">💬 ' + esc(h.rebuttal) + '</div>' : '') +
+      '</li>';
+  }
+
+  function renderSteps() {
+    $('scriptSteps').innerHTML = call.ctx.steps.map(function (s, i) {
+      return '<li class="script-step" data-index="' + i + '">' +
+        '<div class="step-head"><span class="step-no">' + (i + 1) + '</span>' + esc(s.step) + '</div>' +
+        '<div class="step-body">' + esc(s.body).replace(/\n/g, '<br>') + '</div>' +
+        (s.point ? '<div class="step-point">💡 ' + esc(s.point) + '</div>' : '') +
+        '</li>';
+    }).join('');
+    setStep(0, true);
+  }
+
+  /** ステップを切り替え、現在のステップを強調して自動でスクロールする */
+  function setStep(index, noScroll) {
+    const steps = $('scriptSteps').children;
+    if (!steps.length) return;
+    call.stepIndex = Math.max(0, Math.min(steps.length - 1, index));
+    Array.prototype.forEach.call(steps, function (li, i) {
+      li.classList.toggle('current', i === call.stepIndex);
+      li.classList.toggle('done', i < call.stepIndex);
+    });
+    $('stepPrevBtn').disabled = call.stepIndex === 0;
+    $('stepNextBtn').disabled = call.stepIndex === steps.length - 1;
+    if (!noScroll) steps[call.stepIndex].scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  function renderRebuttalButtons() {
+    $('rebuttalButtons').innerHTML = call.ctx.rebuttals.map(function (r) {
+      return '<button type="button" class="rebuttal-btn" data-category="' + esc(r.category) + '">' + esc(r.category) + '</button>';
+    }).join('');
+  }
+
+  /**
+   * 切り返しトークを表示する
+   * @param {string} category 断り文句の分類
+   * @param {{source: string, talk?: string, nextAction?: string, matched?: string[], note?: string}} opt
+   *   source: 'button'(ボタンで選択)/ 'suggest'(入力から判定)
+   */
+  function showRebuttal(category, opt) {
+    const r = call.ctx.rebuttals.filter(function (x) { return x.category === category; })[0];
+    if (!r) return;
+    const talk = opt.talk || r.talk;
+    const nextAction = opt.nextAction || r.nextAction;
+    const source = opt.source === 'suggest'
+      ? '🔎 ' + (opt.matched && opt.matched.length ? '「' + opt.matched.join('」「') + '」から判定' : '入力内容から判定')
+      : '';
+
+    const box = $('rebuttalDetail');
+    box.className = 'rebuttal-detail';
+    box.hidden = false;
+    box.innerHTML =
+      '<div class="rd-head">💬 ' + esc(category) + (source ? '<span class="rd-source">' + esc(source) + '</span>' : '') + '</div>' +
+      '<div class="rd-talk">' + esc(talk).replace(/\n/g, '<br>') + '</div>' +
+      (nextAction ? '<div class="rd-next">次のアクション:<strong>' + esc(nextAction) + '</strong></div>' : '') +
+      (opt.note ? '<div class="rd-source">' + esc(opt.note) + '</div>' : '');
+
+    document.querySelectorAll('.rebuttal-btn').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.category === category);
+    });
+    $('rebuttalUsed').value = category; // 結果入力の「使用した切り返し」にも反映
+    if (IS_TOUCH && opt.source === 'button') box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function showNoRebuttal(message) {
+    const box = $('rebuttalDetail');
+    box.className = 'rebuttal-detail empty';
+    box.hidden = false;
+    box.textContent = message;
+    document.querySelectorAll('.rebuttal-btn').forEach(function (b) { b.classList.remove('active'); });
+  }
+
+  /** 相手の言葉の入力:入力が止まってから判定する(打つたびにサーバーを呼ばない) */
+  function onObjectionInput(e) {
+    clearTimeout(call.suggestTimer);
+    const text = e.target.value.trim();
+    if (text.length < 2) return;
+    call.suggestTimer = setTimeout(function () {
+      const seq = ++call.suggestSeq;
+      showNoRebuttal('判定中…');
+      callServer('suggestRebuttal', [text, call.ctx.prospect.id, state.staff.name], { silent: true })
+        .then(function (res) {
+          if (seq !== call.suggestSeq || !call.ctx) return;
+          if (res.found) {
+            showRebuttal(res.category, { source: 'suggest', talk: res.talk, nextAction: res.nextAction, matched: res.matched, note: res.note });
+          } else {
+            showNoRebuttal('該当する切り返しが見つかりませんでした。下のボタンから選んでください。');
+          }
+        })
+        .catch(function (err) {
+          if (seq === call.suggestSeq) showNoRebuttal('判定に失敗しました:' + err.message);
+        });
+    }, 400);
+  }
+
+  /* --- 通話タイマー --- */
+  function startTimer() {
+    stopTimer();
+    call.startedAt = Date.now();
+    $('callTimer').classList.remove('stopped');
+    renderTimer();
+    call.timerId = setInterval(renderTimer, 1000);
+  }
+  function stopTimer() {
+    if (call.timerId) clearInterval(call.timerId);
+    call.timerId = null;
+    $('callTimer').classList.add('stopped');
+  }
+  function renderTimer() {
+    const sec = Math.floor((Date.now() - call.startedAt) / 1000);
+    $('callTimer').textContent = '⏱ ' + String(Math.floor(sec / 60)).padStart(2, '0') + ':' + String(sec % 60).padStart(2, '0');
+  }
+
+  /* --- 番号コピー(PC用) --- */
+  function copyPhone() {
+    const phone = call.ctx.prospect.phone;
+    const fallback = function () {
+      const ta = document.createElement('textarea');
+      ta.value = phone;
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      toast(ok ? '電話番号をコピーしました' : 'コピーできませんでした:' + phone, ok ? '' : 'error');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(phone).then(function () { toast('電話番号をコピーしました'); }, fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  /* --- 架電結果 --- */
+  /** 'yyyy-MM-dd' から n 営業日後(土日を飛ばす) */
+  function addBusinessDays(dateStr, n) {
+    const p = dateStr.split('-').map(Number);
+    const d = new Date(p[0], p[1] - 1, p[2]);
+    let added = 0;
+    while (added < n) {
+      d.setDate(d.getDate() + 1);
+      if (d.getDay() !== 0 && d.getDay() !== 6) added++;
+    }
+    return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
+  }
+
+  function selectResultStatus(status) {
+    call.status = status;
+    document.querySelectorAll('.status-choice').forEach(function (b) {
+      const on = b.dataset.status === status;
+      b.classList.toggle('selected', on);
+      b.setAttribute('aria-checked', on);
+    });
+    const input = $('nextCallInput');
+    const clears = STATUS_CLEARS_NEXT_DATE.indexOf(status) !== -1;
+    input.disabled = clears;
+    if (clears) input.value = '';
+    else if (!input.value && NEXT_DATE_SUGGEST_DAYS[status]) input.value = addBusinessDays(call.ctx.today, NEXT_DATE_SUGGEST_DAYS[status]);
+    $('nextCallReq').hidden = STATUS_REQUIRES_NEXT_DATE.indexOf(status) === -1;
+  }
+
+  /**
+   * 架電結果が記録された後の画面更新(結果の保存・資料送付の共通処理)
+   * @param {{prospect: Object, history: Object, progress: Object, updatedHistory?: boolean}} res
+   * @param {string} message 保存後パネルに表示する文
+   */
+  function onCallRecorded(res, message) {
+    call.saved = true;
+    call.historyId = res.history.id;
+    stopTimer();
+    // 画面のリストにも反映(リスト区分はサーバー側でステータスから自動決定済み)
+    state.prospects = state.prospects.map(function (p) { return p.id === res.prospect.id ? res.prospect : p; });
+    call.ctx.prospect = res.prospect;
+    if (res.updatedHistory) {
+      call.ctx.history = call.ctx.history.map(function (h) { return h.id === res.history.id ? res.history : h; });
+    } else {
+      call.ctx.history.unshift(res.history);
+    }
+    renderCallInfo();
+    const first = $('callInfo').querySelector('.history-item');
+    if (first) first.classList.add('is-new');
+    renderProgress(res.progress.todayCount, res.progress.dailyTarget);
+
+    $('resultForm').hidden = true;
+    $('savedPanel').hidden = false;
+    $('savedSummary').textContent = '✅ ' + message + ' → ' + res.prospect.listType + 'リストに移動' +
+      (res.prospect.nextCallDate ? '(次回 ' + shortDate(res.prospect.nextCallDate) + ')' : '');
+    $('savedPanel').scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }
+
+  function saveResult() {
+    if (!call.status) return toast('結果のステータスを選んでください', 'error');
+    const nextCallDate = $('nextCallInput').value;
+    if (STATUS_REQUIRES_NEXT_DATE.indexOf(call.status) !== -1 && !nextCallDate) {
+      $('nextCallInput').focus();
+      return toast('「' + call.status + '」の場合は次回架電日を入力してください', 'error');
+    }
+    const input = {
+      prospectId: call.ctx.prospect.id,
+      staffName: state.staff.name,
+      status: call.status,
+      memo: $('callMemo').value,
+      nextCallDate: nextCallDate,
+      rebuttal: $('rebuttalUsed').value,
+    };
+    callServer('saveCallResult', [input], { button: $('saveResultBtn') })
+      .then(function (res) {
+        onCallRecorded(res, '「' + res.prospect.status + '」で保存しました');
+        toast('架電結果を保存しました');
+      })
+      .catch(function (err) { toast(err.message, 'error'); });
+  }
+  /* ===== 資料送付 ===== */
+  const mail = { mails: [], selected: '' };
+
+  function bindMailEvents() {
+    $('mailCloseBtn').addEventListener('click', closeMailDialog);
+    $('mailCancelBtn').addEventListener('click', closeMailDialog);
+    $('mailModal').addEventListener('click', function (e) { if (e.target === $('mailModal')) closeMailDialog(); });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape' && !$('mailModal').hidden) closeMailDialog(); });
+    $('materialChoices').addEventListener('click', function (e) {
+      const btn = e.target.closest('.material-choice');
+      if (btn) selectMaterial(btn.dataset.name);
+    });
+    document.querySelectorAll('input[name="mailMode"]').forEach(function (r) {
+      r.addEventListener('change', renderMailSendLabel);
+    });
+    $('mailSendBtn').addEventListener('click', sendMaterial);
+  }
+  document.addEventListener('DOMContentLoaded', bindMailEvents);
+
+  function openMailDialog(e) {
+    if (!call.ctx) return;
+    const button = e && e.currentTarget;
+    callServer('getMaterialMails', [call.ctx.prospect.id, state.staff.name], { button: button })
+      .then(function (res) {
+        if (!res.mails.length) return toast('資料シートに資料が登録されていません', 'error');
+        mail.mails = res.mails;
+        $('mailTo').value = res.to;
+        $('materialChoices').innerHTML = res.mails.map(function (m) {
+          return '<button type="button" class="material-choice" data-name="' + esc(m.name) + '">📄 ' + esc(m.name) + '</button>';
+        }).join('');
+        selectMaterial(res.mails[0].name);
+        document.querySelector('input[name="mailMode"][value="draft"]').checked = true;
+        renderMailSendLabel();
+        $('mailRecordNote').textContent = call.saved
+          ? 'ℹ️ 今回の架電履歴を「資料送付済み」に更新し、送付した資料をメモに追記します。'
+          : 'ℹ️ 送付すると、今回の架電結果を「資料送付済み」として保存します(入力中の通話メモ・次回架電日・使用した切り返しも一緒に保存)。';
+        $('mailModal').hidden = false;
+      })
+      .catch(function (err) { toast(err.message, 'error'); });
+  }
+
+  function closeMailDialog() {
+    $('mailModal').hidden = true;
+  }
+
+  /** 資料を選ぶと、その資料のテンプレートで件名・本文を入れ直す */
+  function selectMaterial(name) {
+    const m = mail.mails.filter(function (x) { return x.name === name; })[0];
+    if (!m) return;
+    mail.selected = name;
+    $('mailSubject').value = m.subject;
+    $('mailBody').value = m.body;
+    document.querySelectorAll('.material-choice').forEach(function (b) {
+      b.classList.toggle('selected', b.dataset.name === name);
+    });
+  }
+
+  function mailMode() {
+    return document.querySelector('input[name="mailMode"]:checked').value;
+  }
+
+  function renderMailSendLabel() {
+    $('mailSendBtn').textContent = mailMode() === 'send' ? '✉️ 今すぐ送信' : '📝 下書きに保存';
+  }
+
+  function sendMaterial() {
+    const mode = mailMode();
+    const to = $('mailTo').value.trim();
+    if (mode === 'send' && !confirm(to + ' 宛てに今すぐ送信します。よろしいですか?')) return;
+
+    // 架電結果の保存前なら、資料送付済みの次回架電日(未入力なら3営業日後)も一緒に保存する
+    let nextCallDate = $('nextCallInput').value;
+    if (!call.saved && !nextCallDate) nextCallDate = addBusinessDays(call.ctx.today, NEXT_DATE_SUGGEST_DAYS['資料送付済み']);
+
+    const input = {
+      prospectId: call.ctx.prospect.id,
+      staffName: state.staff.name,
+      materialName: mail.selected,
+      to: to,
+      subject: $('mailSubject').value,
+      body: $('mailBody').value,
+      mode: mode,
+      historyId: call.saved ? call.historyId : '',
+      memo: $('callMemo').value,
+      nextCallDate: nextCallDate,
+      rebuttal: $('rebuttalUsed').value,
+    };
+    callServer('sendMaterial', [input], { button: $('mailSendBtn') })
+      .then(function (res) {
+        closeMailDialog();
+        const how = res.mode === 'send'
+          ? (res.redirected ? '送信しました(デモのため実行ユーザーのアドレス宛て)' : '送信しました')
+          : 'Gmailの下書きに保存しました';
+        onCallRecorded(res, '「' + mail.selected + '」を' + how);
+        toast('「' + mail.selected + '」を' + how);
+      })
+      .catch(function (err) { toast(err.message, 'error'); });
+  }
+
+  /* ===== 地図検索 ===== */
+  const PIN_COLOR = { customer: '#2e7d32', prospect: '#1e66d0', center: '#d32f2f' };
+  const mapState = {
+    map: null,
+    data: null,          // getMapData の結果
+    loading: null,       // 初期化中の Promise
+    center: null,        // { lat, lng, label }
+    radiusKm: 2,
+    circle: null,
+    centerMarker: null,
+    customerLayer: null,
+    prospectLayer: null,
+    customerMarkers: {}, // 導入企業ID → マーカー
+  };
+
+  function bindMapEvents() {
+    $('mapSearchForm').addEventListener('submit', function (e) {
+      e.preventDefault();
+      searchAddress();
+    });
+    // スライダーを動かしている間も、円と集計をリアルタイムに更新する
+    $('radiusSlider').addEventListener('input', function (e) { setRadius(Number(e.target.value), false); });
+    $('radiusSlider').addEventListener('change', function (e) { setRadius(Number(e.target.value), true); });
+    $('toggleCustomers').addEventListener('change', applyLayerToggles);
+    $('toggleProspects').addEventListener('change', applyLayerToggles);
+    $('nearbyList').addEventListener('click', function (e) {
+      const li = e.target.closest('.nearby-item');
+      if (!li) return;
+      const marker = mapState.customerMarkers[li.dataset.id];
+      if (marker) {
+        mapState.map.setView(marker.getLatLng(), Math.max(mapState.map.getZoom(), 15));
+        marker.openPopup();
+      }
+    });
+  }
+  document.addEventListener('DOMContentLoaded', bindMapEvents);
+
+  /** 地図を初めて開いたときに作る(表示中でないと大きさが正しく測れないため) */
+  function ensureMap() {
+    if (mapState.map) return Promise.resolve();
+    if (mapState.loading) return mapState.loading;
+    if (typeof L === 'undefined') {
+      toast('地図ライブラリを読み込めませんでした。通信環境を確認してください', 'error');
+      return Promise.reject(new Error('Leaflet not loaded'));
+    }
+    mapState.loading = callServer('getMapData').then(function (data) {
+      mapState.data = data;
+      const slider = $('radiusSlider');
+      slider.min = data.radius.MIN;
+      slider.max = data.radius.MAX;
+      slider.step = data.radius.STEP;
+      mapState.radiusKm = data.defaultRadiusKm;
+
+      // 円の範囲計算などに地図の表示位置が必要なため、作るときに中心とズームを決めておく
+      const map = L.map('map', { center: [data.center.lat, data.center.lng], zoom: 14 });
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank">OpenStreetMap</a> contributors',
+      }).addTo(map);
+      mapState.map = map;
+      mapState.customerLayer = L.layerGroup().addTo(map);
+      mapState.prospectLayer = L.layerGroup().addTo(map);
+      mapState.circle = L.circle([data.center.lat, data.center.lng], {
+        radius: mapState.radiusKm * 1000, color: PIN_COLOR.customer, weight: 2, fillOpacity: 0.08,
+      }).addTo(map);
+      mapState.centerMarker = L.circleMarker([data.center.lat, data.center.lng], {
+        radius: 10, color: '#fff', weight: 3, fillColor: PIN_COLOR.center, fillOpacity: 1,
+      }).addTo(map);
+
+      data.customers.forEach(function (c) {
+        mapState.customerMarkers[c.id] = L.circleMarker([c.lat, c.lng], {
+          radius: 7, color: '#fff', weight: 2, fillColor: PIN_COLOR.customer, fillOpacity: 0.9,
+        }).bindPopup('').addTo(mapState.customerLayer);
+      });
+      if (!mapState.center) mapState.center = { lat: data.center.lat, lng: data.center.lng, label: '初期位置(設定シートの中心座標)' };
+    }).finally(function () { mapState.loading = null; });
+    return mapState.loading;
+  }
+
+  function onMapTabShown() {
+    return ensureMap().then(function () {
+      mapState.map.invalidateSize();
+      renderProspectPins();
+      setRadius(mapState.radiusKm, false);
+      setCenter(mapState.center.lat, mapState.center.lng, mapState.center.label);
+    }).catch(function (err) {
+      if (err && err.message !== 'Leaflet not loaded') toast(err.message, 'error');
+    });
+  }
+
+  /** 架電リスト・架電モードから「地図で見る」 */
+  function openMapForProspect(id) {
+    const p = findProspect(id) || (call.ctx && call.ctx.prospect.id === id ? call.ctx.prospect : null);
+    if (!p || p.lat == null) return toast('この会社には緯度経度が登録されていません', 'error');
+    mapState.center = { lat: p.lat, lng: p.lng, label: '🏢 ' + p.company + '(' + p.address + ')' };
+    showMainTab('map');
+  }
+
+  function searchAddress() {
+    const address = $('mapAddress').value.trim();
+    if (!address) return toast('住所を入力してください', 'error');
+    ensureMap()
+      .then(function () { return callServer('geocode', [address], { button: $('mapSearchBtn') }); })
+      .then(function (res) {
+        mapState.center = { lat: res.lat, lng: res.lng, label: '📍 ' + res.address };
+        setCenter(res.lat, res.lng, mapState.center.label);
+      })
+      .catch(function (err) { if (err && err.message !== 'Leaflet not loaded') toast(err.message, 'error'); });
+  }
+
+  function setCenter(lat, lng, label) {
+    mapState.circle.setLatLng([lat, lng]);
+    mapState.centerMarker.setLatLng([lat, lng]).bindTooltip(esc(label));
+    $('mapCenterLabel').textContent = label;
+    mapState.map.fitBounds(mapState.circle.getBounds(), { padding: [20, 20] });
+    updateNearby();
+  }
+
+  /**
+   * 半径を変える
+   * @param {number} km
+   * @param {boolean} fit true なら円が収まるように地図の縮尺を合わせる(スライダーを離したとき)
+   */
+  function setRadius(km, fit) {
+    mapState.radiusKm = km;
+    $('radiusSlider').value = km;
+    $('radiusLabel').textContent = km.toFixed(1);
+    if (!mapState.map) return;
+    mapState.circle.setRadius(km * 1000);
+    if (fit) mapState.map.fitBounds(mapState.circle.getBounds(), { padding: [20, 20] });
+    updateNearby();
+  }
+
+  /** 2点間の距離(km)をハバーサイン公式で求める(サーバー側 MapService.js と同じ計算) */
+  function haversineKm(lat1, lng1, lat2, lng2) {
+    const toRad = function (deg) { return deg * Math.PI / 180; };
+    const dLat = toRad(lat2 - lat1);
+    const dLng = toRad(lng2 - lng1);
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+    return 2 * 6371 * Math.asin(Math.sqrt(a));
+  }
+
+  function formatKm(km) {
+    return km < 1 ? Math.round(km * 1000) + 'm' : km.toFixed(1) + 'km';
+  }
+
+  /** 範囲内の導入企業数・プラン別の内訳・近い順の一覧を更新し、範囲外のピンを薄くする */
+  function updateNearby() {
+    if (!mapState.map || !mapState.center) return;
+    const c = mapState.circle.getLatLng();
+    const within = [];
+    mapState.data.customers.forEach(function (cu) {
+      const d = haversineKm(c.lat, c.lng, cu.lat, cu.lng);
+      const inside = d <= mapState.radiusKm;
+      const marker = mapState.customerMarkers[cu.id];
+      marker.setStyle({ fillOpacity: inside ? 0.95 : 0.25, opacity: inside ? 1 : 0.4 });
+      marker.setPopupContent(
+        '<div class="map-popup"><strong>' + esc(cu.company) + '</strong><br>' +
+        esc(cu.plan) + 'プラン・' + cu.pots + '鉢<br>導入 ' + esc(cu.startDate) + '<br>📏 ' + formatKm(d) + '</div>');
+      if (inside) within.push(Object.assign({ distanceKm: d }, cu));
+    });
+    within.sort(function (a, b) { return a.distanceKm - b.distanceKm; });
+
+    $('nearbyCount').textContent = within.length;
+    const max = Math.max(1, within.length);
+    $('planBreakdown').innerHTML = mapState.data.plans.map(function (plan) {
+      const n = within.filter(function (x) { return x.plan === plan; }).length;
+      return '<div class="plan-row"><span>' + esc(plan) + '</span>' +
+        '<div class="plan-bar"><span style="width:' + Math.round(n / max * 100) + '%"></span></div>' +
+        '<span class="num">' + n + '社</span></div>';
+    }).join('');
+    $('nearbyList').innerHTML = within.length
+      ? within.map(function (x) {
+          return '<li class="nearby-item" data-id="' + esc(x.id) + '"><div><div class="ni-name">' + esc(x.company) + '</div>' +
+            '<div class="field-label">' + esc(x.plan) + '・' + x.pots + '鉢</div></div>' +
+            '<div class="ni-dist">' + formatKm(x.distanceKm) + '</div></li>';
+        }).join('')
+      : '<li class="field-label">範囲内に導入企業はありません。半径を広げてみてください。</li>';
+  }
+
+  /** 見込み客のピン(選択中の担当者が見られる会社) */
+  function renderProspectPins() {
+    mapState.prospectLayer.clearLayers();
+    state.prospects.forEach(function (p) {
+      if (p.lat == null) return;
+      L.circleMarker([p.lat, p.lng], {
+        radius: 6, color: '#fff', weight: 2, fillColor: PIN_COLOR.prospect, fillOpacity: 0.85,
+      }).bindPopup(
+        '<div class="map-popup"><strong>' + esc(p.company) + '</strong><br>' + esc(p.status) +
+        (p.nextCallDate ? '・次回 ' + shortDate(p.nextCallDate) : '') + '<br>' + esc(p.address) + '</div>'
+      ).addTo(mapState.prospectLayer);
+    });
+    applyLayerToggles();
+  }
+
+  function applyLayerToggles() {
+    if (!mapState.map) return;
+    [[mapState.customerLayer, $('toggleCustomers').checked], [mapState.prospectLayer, $('toggleProspects').checked]]
+      .forEach(function (pair) {
+        if (pair[1]) pair[0].addTo(mapState.map);
+        else mapState.map.removeLayer(pair[0]);
+      });
+  }
+  /* ===== 成果ダッシュボード ===== */
+  /** グラフの色(dataviz の検証スクリプトで、隣り合う色の見分けやすさを確認済みの並び) */
+  const DASH_COLOR = {
+    calls: '#2a78d6',
+    won: '#008300',
+    bar: '#2a78d6',
+    grid: '#eef1ee',
+    text: '#66736b',
+    surface: '#ffffff',
+    status: {
+      '未架電': '#2a78d6', '不在・再架電': '#eb6834', '見込み': '#1baf7a',
+      '資料送付済み': '#4a3aa7', '成約': '#008300', 'NG': '#e87ba4',
+    },
+  };
+  const dash = { period: 'today', owner: '', charts: {}, seq: 0 };
+
+  function bindDashEvents() {
+    $('periodTabs').addEventListener('click', function (e) {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      dash.period = btn.dataset.period;
+      document.querySelectorAll('#periodTabs .seg-btn').forEach(function (b) { b.classList.toggle('active', b === btn); });
+      loadDashboard();
+    });
+    $('dashOwnerFilter').addEventListener('change', function (e) {
+      dash.owner = e.target.value;
+      loadDashboard();
+    });
+  }
+  document.addEventListener('DOMContentLoaded', bindDashEvents);
+
+  function loadDashboard() {
+    if (!state.staff) return Promise.resolve();
+    const seq = ++dash.seq;
+    return callServer('getDashboard', [state.staff.name, dash.period, dash.owner])
+      .then(function (data) {
+        if (seq !== dash.seq) return; // 期間を続けて切り替えたときは最後の結果だけ表示
+        renderDashboard(data);
+      })
+      .catch(function (err) { toast(err.message, 'error'); });
+  }
+
+  function renderDashboard(d) {
+    $('dashRange').textContent = d.periodLabel + '(' + d.rangeText.replace(/-/g, '/') + ')' +
+      (d.isManager ? '・' + (d.owner || 'チーム全体') : '');
+    renderKpis(d.metrics);
+    renderOwnerTable(d);
+    if (typeof Chart === 'undefined') {
+      toast('グラフのライブラリを読み込めませんでした。通信環境を確認してください', 'error');
+      return;
+    }
+    setupChartDefaults();
+    renderTrend(d);
+    renderStatusMix(d.statusMix);
+    renderRebuttalChart(d.rebuttals);
+  }
+
+  function renderKpis(m) {
+    const cards = [
+      ['架電数', m.calls, '件', ''],
+      ['接続数', m.connected, '件', '不在以外'],
+      ['見込み化数', m.prospect, '件', ''],
+      ['資料送付数', m.material, '件', ''],
+      ['成約数', m.won, '件', ''],
+      ['成約率', m.winRate.toFixed(1), '%', '成約数 ÷ 接続数'],
+    ];
+    $('kpiGrid').innerHTML = cards.map(function (c, i) {
+      return '<div class="kpi' + (i === 4 ? ' highlight' : '') + '"><div class="kpi-label">' + c[0] + '</div>' +
+        '<div class="kpi-value">' + esc(c[1]) + '<small>' + c[2] + '</small></div>' +
+        (c[3] ? '<div class="kpi-sub">' + c[3] + '</div>' : '') + '</div>';
+    }).join('');
+  }
+
+  /** 担当者別の比較表(マネージャーのみ) */
+  function renderOwnerTable(d) {
+    $('ownerCompare').hidden = !d.isManager;
+    if (!d.isManager) return;
+    const medals = ['🥇', '🥈', '🥉'];
+    const maxRate = Math.max.apply(null, d.byOwner.map(function (m) { return m.winRate; }).concat([1]));
+    $('ownerTable').innerHTML =
+      '<thead><tr><th>順位</th><th class="left">担当者</th><th>架電数</th><th>接続数</th><th>見込み化</th><th>資料送付</th><th>成約数</th><th>成約率</th></tr></thead>' +
+      '<tbody>' + d.byOwner.map(function (m) {
+        return '<tr' + (m.rank === 1 && m.won > 0 ? ' class="top"' : '') + '>' +
+          '<td><span class="rank">' + (medals[m.rank - 1] || m.rank) + '</span></td>' +
+          '<td class="left">' + esc(m.name) + '</td><td>' + m.calls + '</td><td>' + m.connected + '</td>' +
+          '<td>' + m.prospect + '</td><td>' + m.material + '</td><td><strong>' + m.won + '</strong></td>' +
+          '<td>' + m.winRate.toFixed(1) + '%<span class="win-bar"><span style="width:' + Math.round(m.winRate / maxRate * 100) + '%"></span></span></td>' +
+          '</tr>';
+      }).join('') + '</tbody>';
+  }
+
+  function setupChartDefaults() {
+    Chart.defaults.font.family = getComputedStyle(document.body).fontFamily;
+    Chart.defaults.font.size = 12;
+    Chart.defaults.color = DASH_COLOR.text;
+    Chart.defaults.animation.duration = 300;
+    Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(31, 42, 36, 0.92)';
+    Chart.defaults.plugins.tooltip.padding = 10;
+    Chart.defaults.plugins.tooltip.cornerRadius = 8;
+  }
+
+  /** 前のグラフを消してから作り直す */
+  function drawChart(id, config) {
+    if (dash.charts[id]) dash.charts[id].destroy();
+    dash.charts[id] = new Chart($(id), config);
+  }
+
+  /** 日別の推移:架電数と成約数は大きさが違うため、軸を共有せず2つのグラフに分ける */
+  function renderTrend(d) {
+    $('trendLabel').textContent = d.trendLabel;
+    const labels = d.trend.dates.map(function (x) { return shortDate(x); });
+    const lineConfig = function (label, data, color) {
+      return {
+        type: 'line',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: label, data: data, borderColor: color, backgroundColor: color,
+            borderWidth: 2, pointRadius: 4, pointHoverRadius: 6, pointBorderColor: DASH_COLOR.surface, pointBorderWidth: 2,
+            tension: 0, // 日ごとの件数なので、点と点を直線で結ぶ(曲線だと実在しない値が見えるため)
+          }],
+        },
+        options: {
+          maintainAspectRatio: false,
+          interaction: { mode: 'index', intersect: false },
+          plugins: { legend: { display: false }, tooltip: { callbacks: { label: function (c) { return label + ':' + c.parsed.y + '件'; } } } },
+          scales: {
+            x: { grid: { display: false }, ticks: { maxRotation: 0, autoSkip: true, maxTicksLimit: 8 } },
+            y: { beginAtZero: true, grid: { color: DASH_COLOR.grid }, border: { display: false }, ticks: { precision: 0, maxTicksLimit: 5 } },
+          },
+        },
+      };
+    };
+    drawChart('trendCallsChart', lineConfig('架電数', d.trend.calls, DASH_COLOR.calls));
+    drawChart('trendWonChart', lineConfig('成約数', d.trend.won, DASH_COLOR.won));
+
+    $('trendTable').innerHTML = '<table class="data-table"><thead><tr><th>日付</th><th>架電数</th><th>成約数</th></tr></thead><tbody>' +
+      d.trend.dates.map(function (x, i) {
+        return '<tr><td>' + shortDate(x) + '</td><td>' + d.trend.calls[i] + '</td><td>' + d.trend.won[i] + '</td></tr>';
+      }).join('') + '</tbody></table>';
+  }
+
+  /** ステータス別の構成:色だけに頼らないよう、凡例に件数と割合を直接書く */
+  function renderStatusMix(mix) {
+    const total = mix.reduce(function (sum, m) { return sum + m.count; }, 0);
+    $('statusTotal').textContent = total;
+    drawChart('statusChart', {
+      type: 'doughnut',
+      data: {
+        labels: mix.map(function (m) { return m.status; }),
+        datasets: [{
+          data: mix.map(function (m) { return m.count; }),
+          backgroundColor: mix.map(function (m) { return DASH_COLOR.status[m.status]; }),
+          borderColor: DASH_COLOR.surface, borderWidth: 2, hoverOffset: 6,
+        }],
+      },
+      options: {
+        maintainAspectRatio: false,
+        cutout: '62%',
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: function (c) {
+            return c.label + ':' + c.parsed + '社(' + (total ? Math.round(c.parsed / total * 100) : 0) + '%)';
+          } } },
+        },
+      },
+    });
+    $('statusLegend').innerHTML = mix.map(function (m) {
+      return '<li><span class="legend-dot" style="background:' + DASH_COLOR.status[m.status] + '"></span>' +
+        '<span>' + esc(m.status) + '</span><span class="num">' + m.count + '社</span>' +
+        '<span class="pct">' + (total ? Math.round(m.count / total * 100) : 0) + '%</span></li>';
+    }).join('');
+  }
+
+  /** 棒の先に件数を書くプラグイン(横棒グラフ用) */
+  const barValueLabels = {
+    id: 'barValueLabels',
+    afterDatasetsDraw: function (chart) {
+      const ctx = chart.ctx;
+      ctx.save();
+      ctx.fillStyle = '#1f2a24';
+      ctx.font = '700 12px ' + Chart.defaults.font.family;
+      ctx.textBaseline = 'middle';
+      chart.getDatasetMeta(0).data.forEach(function (bar, i) {
+        ctx.fillText(chart.data.datasets[0].data[i] + '件', bar.x + 6, bar.y);
+      });
+      ctx.restore();
+    },
+  };
+
+  function renderRebuttalChart(items) {
+    drawChart('rebuttalChart', {
+      type: 'bar',
+      data: {
+        labels: items.map(function (r) { return r.category; }),
+        datasets: [{
+          label: '発生件数', data: items.map(function (r) { return r.count; }),
+          backgroundColor: DASH_COLOR.bar, borderRadius: 4, borderSkipped: 'start', maxBarThickness: 18,
+        }],
+      },
+      options: {
+        indexAxis: 'y',
+        maintainAspectRatio: false,
+        layout: { padding: { right: 44 } },
+        plugins: { legend: { display: false }, tooltip: { callbacks: { label: function (c) { return '発生件数:' + c.parsed.x + '件'; } } } },
+        scales: {
+          x: { beginAtZero: true, grid: { color: DASH_COLOR.grid }, border: { display: false }, ticks: { precision: 0, maxTicksLimit: 5 } },
+          y: { grid: { display: false } },
+        },
+      },
+      plugins: [barValueLabels],
+    });
+    $('rebuttalTable').innerHTML = '<table class="data-table"><thead><tr><th>断り文句の分類</th><th>発生件数</th></tr></thead><tbody>' +
+      items.map(function (r) { return '<tr><td>' + esc(r.category) + '</td><td>' + r.count + '</td></tr>'; }).join('') +
+      '</tbody></table>';
+  }
+</script>

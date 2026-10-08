@@ -1,0 +1,20 @@
+# clasp の認証情報(絶対にコミットしない)
+.clasprc.json
+**/.clasprc.json
+
+# scriptId を含むため、各自の環境で設定する
+.clasp.json
+
+# 秘密情報・環境変数
+.env
+.env.*
+*.key
+secrets*.json
+credentials*.json
+
+# Node / エディタ / OS
+node_modules/
+npm-debug.log*
+.DS_Store
+.vscode/
+.idea/
