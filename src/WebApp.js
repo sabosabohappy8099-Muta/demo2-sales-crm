@@ -9,7 +9,9 @@
  * @return {GoogleAppsScript.HTML.HtmlOutput}
  */
 function doGet() {
-  return HtmlService.createTemplateFromFile('index')
+  const template = HtmlService.createTemplateFromFile('index');
+  template.publicDemo = getPublicDemoInfo_();
+  return template
     .evaluate()
     .setTitle(APP.TOOL_NAME + '|' + APP.COMPANY_NAME)
     .addMetaTag('viewport', 'width=device-width, initial-scale=1');

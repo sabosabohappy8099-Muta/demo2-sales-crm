@@ -433,11 +433,17 @@
 
   /** 電話番号を tel: リンク用の形にする */
   function telHref(phone) {
+    // 公開デモでは電話をかけない(知らない人が触っても発信されないようにする)
+    if (window.PUBLIC_DEMO === true) return '#';
     return 'tel:' + String(phone || '').replace(/[^\d+]/g, '');
   }
 
   /** スマホでは、押したその場で電話アプリを起動する(押した操作の中で呼ぶ必要がある) */
   function dial(phone) {
+    if (window.PUBLIC_DEMO === true) {
+      toast('デモのため、実際には発信しません(本番では、ここで電話アプリが起動します)');
+      return;
+    }
     const a = document.createElement('a');
     a.href = telHref(phone);
     a.target = '_top';
@@ -445,6 +451,15 @@
     a.click();
     a.remove();
   }
+
+  // 公開デモでは「📞 発信」ボタンを押しても発信せず、案内だけを出す
+  document.addEventListener('DOMContentLoaded', function () {
+    if (window.PUBLIC_DEMO !== true) return;
+    $('callDial').addEventListener('click', function (e) {
+      e.preventDefault();
+      toast('デモのため、実際には発信しません(本番では、ここで電話アプリが起動します)');
+    });
+  });
 
   function findProspect(id) {
     return state.prospects.filter(function (p) { return p.id === id; })[0];
@@ -860,7 +875,8 @@
   function sendMaterial() {
     const mode = mailMode();
     const to = $('mailTo').value.trim();
-    if (mode === 'send' && !confirm(to + ' 宛てに今すぐ送信します。よろしいですか?')) return;
+    const demoNote = window.PUBLIC_DEMO === true ? '\n(デモのため、実際には送信されません)' : '';
+    if (mode === 'send' && !confirm(to + ' 宛てに今すぐ送信します。よろしいですか?' + demoNote)) return;
 
     // 架電結果の保存前なら、資料送付済みの次回架電日(未入力なら3営業日後)も一緒に保存する
     let nextCallDate = $('nextCallInput').value;
@@ -882,9 +898,11 @@
     callServer('sendMaterial', [input], { button: $('mailSendBtn') })
       .then(function (res) {
         closeMailDialog();
-        const how = res.mode === 'send'
-          ? (res.redirected ? '送信しました(デモのため実行ユーザーのアドレス宛て)' : '送信しました')
-          : 'Gmailの下書きに保存しました';
+        const how = res.demo
+          ? '記録しました(デモのため、実際には送信・保存しません)'
+          : res.mode === 'send'
+            ? (res.redirected ? '送信しました(デモのため実行ユーザーのアドレス宛て)' : '送信しました')
+            : 'Gmailの下書きに保存しました';
         onCallRecorded(res, '「' + mail.selected + '」を' + how);
         toast('「' + mail.selected + '」を' + how);
       })

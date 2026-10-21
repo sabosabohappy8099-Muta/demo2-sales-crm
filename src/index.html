@@ -8,6 +8,14 @@
   <?!= include('css'); ?>
 </head>
 <body>
+  <script>window.PUBLIC_DEMO = <?!= publicDemo ? 'true' : 'false' ?>;</script>
+  <? if (publicDemo) { ?>
+  <!-- 公開デモの案内 -->
+  <div class="demo-banner" role="note">
+    <strong>ポートフォリオ用のデモです。</strong>
+    会社・見込み客・担当者はすべて架空です。自由に操作できます。電話はかからず、メールも実際には送信されません。データは毎朝<?= publicDemo.resetHour ?>時に最初の状態に戻ります。
+  </div>
+  <? } ?>
   <!-- 画面上部:会社名・ツール名/担当者の選択/今日の進捗 -->
   <header class="app-header">
     <div class="brand">
@@ -284,7 +292,7 @@
           </label>
           <label class="send-mode">
             <input type="radio" name="mailMode" value="send">
-            <span><strong>今すぐ送信</strong><small>送信先が example.com(ダミー)の場合は、デモのためWebアプリの実行ユーザー自身のアドレスに送信します</small></span>
+            <span><strong>今すぐ送信</strong><small><? if (publicDemo) { ?>デモのため、実際には送信しません(送った内容の記録だけが残ります)<? } else { ?>送信先が example.com(ダミー)の場合は、デモのためWebアプリの実行ユーザー自身のアドレスに送信します<? } ?></small></span>
           </label>
         </div>
         <div class="mail-note" id="mailRecordNote"></div>

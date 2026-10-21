@@ -240,7 +240,9 @@ function seedSettings_() {
 
 /** 担当者を登録する(メールアドレスは実行者のアドレス) */
 function seedStaff_() {
-  const email = Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail();
+  // 公開デモでは自分のアドレスを使わない(架空のアドレスにする)
+  const email = PUBLIC_DEMO_MODE ? DEMO_STAFF_EMAIL
+    : (Session.getActiveUser().getEmail() || Session.getEffectiveUser().getEmail());
   const rows = STAFF_SEED.map(function (s) { return [s[0], email, s[1]]; });
   seedIfEmpty_(SHEET.STAFF, rows);
 }
@@ -253,6 +255,12 @@ function seedMaterials_() {
   const sheet = getSheet_(SHEET.MATERIALS);
   if (sheet.getLastRow() > 1) return;
 
+  // 公開デモでは PDF を作らない(ドライブ・ドキュメントの権限を持たせないため)。資料の名前と文面だけを登録する
+  if (PUBLIC_DEMO_MODE) {
+    const demoRows = MATERIAL_SEED.map(function (m) { return [m.name, '', m.subject, m.body]; });
+    sheet.getRange(2, 1, demoRows.length, 4).setValues(demoRows);
+    return;
+  }
   const folder = getOrCreateFolder_(MATERIAL_FOLDER_NAME);
   const rows = MATERIAL_SEED.map(function (m) {
     const fileId = createMaterialPdf_(m, folder);

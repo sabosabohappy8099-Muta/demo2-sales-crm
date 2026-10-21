@@ -91,6 +91,7 @@ function sendMaterial_(input) {
 
   result.mode = mode;
   result.redirected = mail.redirected;
+  result.demo = Boolean(mail.demo);
   writeLog_('sendMaterial', '成功', '');
   return result;
 }
@@ -106,6 +107,12 @@ function sendMaterial_(input) {
  * @return {{redirected: boolean}}
  */
 function deliverMail_(to, subject, body, material, mode) {
+  // 公開デモでは送らず、Gmail の下書きも作らない。ドライブの資料も読まない
+  if (PUBLIC_DEMO_MODE) {
+    const kind = mode === MAIL_MODE.DRAFT ? '資料の下書き' : '資料の送付';
+    recordDemoMail_(kind, to, subject, body + '\n\n[添付] ' + material.name + '.pdf');
+    return { redirected: false, demo: true };
+  }
   let attachment;
   try {
     attachment = DriveApp.getFileById(material.fileId).getBlob();

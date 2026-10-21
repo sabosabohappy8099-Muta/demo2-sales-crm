@@ -216,6 +216,8 @@ function getProp_(key) {
  * @return {GoogleAppsScript.Spreadsheet.Spreadsheet}
  */
 function getSpreadsheet_() {
+  // 公開デモは「このスクリプトが付いているスプレッドシート」しか開けない権限で動かす
+  if (PUBLIC_DEMO_MODE) return SpreadsheetApp.getActiveSpreadsheet();
   const active = SpreadsheetApp.getActiveSpreadsheet();
   if (active) return active;
   const id = getProp_(PROP_KEY.SPREADSHEET_ID);

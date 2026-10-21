@@ -17,7 +17,9 @@ const AI_NO_MATCH = '該当なし';
  * @return {{found: boolean, category: string, talk: string, nextAction: string, matched: string[], provider: string, note: string}}
  */
 function suggestRebuttal_(text, prospect, staffName) {
-  const provider = String(getProp_(PROP_KEY.AI_PROVIDER) || AI_PROVIDER.MOCK).trim().toUpperCase();
+  // 公開デモでは API を使わない(費用がかからず、外部への通信の権限も持たせない)
+  const provider = PUBLIC_DEMO_MODE ? AI_PROVIDER.MOCK
+    : String(getProp_(PROP_KEY.AI_PROVIDER) || AI_PROVIDER.MOCK).trim().toUpperCase();
   if (provider !== AI_PROVIDER.CLAUDE && provider !== AI_PROVIDER.GEMINI) {
     return mockSuggest_(text, prospect, staffName);
   }

@@ -18,3 +18,8 @@ npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+
+# 公開デモ:組み立てた版と、公開デモ用の scriptId・デプロイID(公開リポジトリではコミットしない)
+build/
+.clasp.public.json
+.public-deployment-id
